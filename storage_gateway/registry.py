@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from .errors import (
     ChecksumMismatchError,
     ContentNotFoundError,
+    ContentUnavailableError,
     EmptyContentError,
     NodeNotFoundError,
     UnauthorizedNodeError,
@@ -39,6 +40,10 @@ class ContentRegistry:
         self._threshold = retrieval_threshold
         self._nodes: dict[str, StorageNode] = {}
         self._contents: dict[str, _ContentRecord] = {}
+        # 已被判定损坏的副本：cid -> 节点 id 集合。
+        # 一旦登记，可检索性判定与修复都不再把它当作健康可用副本，
+        # 直到该副本被移除（修复替换）为止。
+        self._corrupt: dict[str, set[str]] = {}
         self._lock = threading.RLock()
 
     # ---- 节点管理 ----
@@ -115,6 +120,61 @@ class ContentRegistry:
         with self._lock:
             return self._require_content(cid).data
 
+    # ---- 内容读取 ----
+    def retrieve_content(self, cid: str) -> bytes:
+        """按内容标识从在线健康副本取回原始字节。
+
+        - CID 从未提交过 → ContentNotFoundError；
+        - 依次尝试在线且未被判定损坏的副本，逐份校验"字节摘要 == CID"：
+          校验通过即返回；校验失败则把该副本登记为损坏并换下一份；
+        - 所有在线副本都损坏（或根本没有在线副本）→ ContentUnavailableError。
+
+        候选节点按 id 排序逐个尝试，同一份内容重复读取结果稳定；
+        整个"读取 + 校验 + 损坏登记"在注册表锁内完成，与修复/上下线串行化。
+        """
+        with self._lock:
+            self._require_content(cid)
+            known_corrupt = self._corrupt.get(cid, set())
+            candidates = sorted(
+                (
+                    n
+                    for n in self._nodes.values()
+                    if n.status is NodeStatus.ONLINE
+                    and n.has(cid)
+                    and n.node_id not in known_corrupt
+                ),
+                key=lambda n: n.node_id,
+            )
+            for node in candidates:
+                data = node.read(cid)
+                if sha256_hex(data) == cid:
+                    return data
+                # 字节与内容标识对不上：认定损坏并登记，绝不返回坏数据
+                self._mark_corrupt(cid, node.node_id)
+            total = sum(1 for n in self._nodes.values() if n.has(cid))
+            corrupt = self._corrupt.get(cid, set())
+            raise ContentUnavailableError(
+                f"content {cid} is recorded but has no healthy online replica "
+                f"(total replicas {total}, known corrupt {len(corrupt)})"
+            )
+
+    def corrupt_nodes_for(self, cid: str) -> tuple[str, ...]:
+        """返回该内容已被判定损坏的副本所在节点 id（排序快照）。"""
+        with self._lock:
+            self._require_content(cid)
+            return tuple(sorted(self._corrupt.get(cid, ())))
+
+    def _mark_corrupt(self, cid: str, node_id: str) -> None:
+        self._corrupt.setdefault(cid, set()).add(node_id)
+
+    def _unmark_corrupt(self, cid: str, node_id: str) -> None:
+        marked = self._corrupt.get(cid)
+        if marked is None:
+            return
+        marked.discard(node_id)
+        if not marked:
+            del self._corrupt[cid]
+
     def list_content_ids(self) -> tuple[str, ...]:
         with self._lock:
             return tuple(self._contents.keys())
@@ -135,8 +195,8 @@ class ContentRegistry:
                 raise UnauthorizedNodeError(
                     f"node {node_id} is not authorized to store content"
                 )
-            # 节点自身继续对 离线 / 重复 / 容量不足 做显式拒绝
-            node.place(cid, record.size)
+            # 节点自身继续对 离线 / 重复 / 容量不足 / 字节不符 做显式拒绝
+            node.place(cid, record.size, record.data)
 
     def remove_replica(self, cid: str, node_id: str) -> None:
         with self._lock:
@@ -145,6 +205,8 @@ class ContentRegistry:
             if node is None:
                 raise NodeNotFoundError(f"node {node_id} not found")
             node.remove(cid, record.size)
+            # 副本被移除后，其损坏登记一并清除（若日后重新放置则为全新副本）
+            self._unmark_corrupt(cid, node_id)
 
     # ---- 计数与可检索性 ----
     def total_replica_count(self, cid: str) -> int:
@@ -153,35 +215,49 @@ class ContentRegistry:
             return sum(1 for n in self._nodes.values() if n.has(cid))
 
     def online_replica_count(self, cid: str) -> int:
+        """在线且未被判定损坏的健康副本数（损坏副本不计入）。"""
         with self._lock:
             self._require_content(cid)
+            corrupt = self._corrupt.get(cid, set())
             return sum(
                 1
                 for n in self._nodes.values()
-                if n.status is NodeStatus.ONLINE and n.has(cid)
+                if n.status is NodeStatus.ONLINE
+                and n.has(cid)
+                and n.node_id not in corrupt
             )
 
     def check_retrievability(self, cid: str) -> RetrievabilityResult:
-        """按"在线健康副本数 >= 阈值"判定可检索性并给出原因。"""
+        """按"在线健康副本数 >= 阈值"判定可检索性并给出原因。
+
+        已被判定损坏的副本不计入在线健康副本数，并在结论中单独说明。
+        """
         with self._lock:
             self._require_content(cid)
             total = self.total_replica_count(cid)
             online = self.online_replica_count(cid)
+            corrupt_count = len(self._corrupt.get(cid, ()))
             retrievable = online >= self._threshold
             reasons: list[str] = []
             if total == 0:
                 reasons.append("内容尚无任何副本")
             elif online == 0:
-                reasons.append(f"全部 {total} 个副本所在节点均离线")
+                reasons.append(f"全部 {total} 个副本所在节点均离线或副本已损坏")
             elif online < self._threshold:
                 reasons.append(
                     f"在线副本数 {online} 低于检索阈值 {self._threshold}"
                     f"（总副本数 {total}）"
                 )
+            if corrupt_count:
+                reasons.append(f"另有 {corrupt_count} 个副本已被判定损坏，不计入健康副本")
             if retrievable:
                 reasons = [
                     f"在线副本数 {online} >= 检索阈值 {self._threshold}"
                 ]
+                if corrupt_count:
+                    reasons.append(
+                        f"另有 {corrupt_count} 个副本已被判定损坏，不计入健康副本"
+                    )
             return RetrievabilityResult(
                 cid=cid,
                 retrievable=retrievable,
@@ -189,6 +265,7 @@ class ContentRegistry:
                 total_replica_count=total,
                 threshold=self._threshold,
                 reasons=tuple(reasons),
+                corrupt_replica_count=corrupt_count,
             )
 
     def total_replicas_system_wide(self) -> int:
@@ -217,7 +294,7 @@ class ContentRegistry:
                     continue
                 if node.free_bytes() < record.size:
                     continue
-                node.place(cid, record.size)
+                node.place(cid, record.size, record.data)
                 return node.node_id
             return None
 

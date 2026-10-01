@@ -58,6 +58,14 @@ class StorageGateway:
     def status(self, cid: str) -> RetrievabilityResult:
         return self._registry.check_retrievability(cid)
 
+    def retrieve(self, cid: str) -> bytes:
+        """按内容标识取回原始字节。
+
+        只从在线健康副本读取并逐份校验；坏副本自动跳过并登记，
+        取不到时按"从未提交"与"无健康副本"区分抛错。
+        """
+        return self._registry.retrieve_content(cid)
+
     def repair(self, cid: str) -> RepairReport:
         return self._repair.repair(cid)
 

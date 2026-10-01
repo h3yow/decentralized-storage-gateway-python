@@ -22,6 +22,14 @@ class ContentNotFoundError(ContentError):
     """引用的内容标识（CID）在注册表中不存在。"""
 
 
+class ContentUnavailableError(ContentError):
+    """内容有记录，但当前没有任何在线健康副本可供读取。
+
+    与 ContentNotFoundError 严格区分：后者是"从未提交过"，
+    本错误是"提交过、但副本全部离线或已被判定损坏"。
+    """
+
+
 # ---- 节点 / 放置层错误 ----
 class PlacementError(StorageError):
     """副本放置相关错误基类。"""

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import GatewayConfig
 from .errors import (
     ChecksumMismatchError,
     ContentNotFoundError,
+    ContentUnavailableError,
     DuplicatePlacementError,
     EmptyContentError,
     NodeNotFoundError,
@@ -26,6 +27,7 @@ _ERROR_STATUS: dict[type[StorageError], int] = {
     EmptyContentError: 400,
     ChecksumMismatchError: 422,
     ContentNotFoundError: 404,
+    ContentUnavailableError: 503,
     NodeNotFoundError: 404,
     UnauthorizedNodeError: 403,
     NodeOfflineError: 409,
@@ -120,6 +122,15 @@ def create_app(
         gw.registry.place_replica(cid, node_id)
         return {"cid": cid, "node_id": node_id, "result": "ok"}
 
+    @app.get("/contents/{cid}")
+    def retrieve_content(cid: str):
+        """按内容标识取回原始字节。
+
+        404 = 从未提交过；503 = 有记录但当前没有健康在线副本可取。
+        """
+        data = gw.retrieve(cid)
+        return Response(content=data, media_type="application/octet-stream")
+
     @app.get("/contents/{cid}/status")
     def content_status(cid: str):
         result = gw.status(cid)
@@ -130,6 +141,7 @@ def create_app(
             "total_replica_count": result.total_replica_count,
             "threshold": result.threshold,
             "reasons": list(result.reasons),
+            "corrupt_replica_count": result.corrupt_replica_count,
         }
 
     @app.post("/contents/{cid}/repair")
@@ -142,6 +154,8 @@ def create_app(
             "after_online_count": report.after_online_count,
             "target_nodes": list(report.target_nodes),
             "reason": report.reason,
+            "replaced_corrupt_nodes": list(report.replaced_corrupt_nodes),
+            "valid_nodes": list(report.valid_nodes),
         }
 
     return app
