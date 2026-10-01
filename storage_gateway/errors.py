@@ -19,7 +19,11 @@ class EmptyContentError(ContentError):
 
 
 class ContentNotFoundError(ContentError):
-    """引用的内容标识（CID）在注册表中不存在。"""
+    """引用的内容标识（CID）在注册表中不存在（从未提交过）。"""
+
+
+class ReplicaUnavailableError(ContentError):
+    """内容有提交记录，但当前没有任何在线健康副本可以取回内容。"""
 
 
 # ---- 节点 / 放置层错误 ----

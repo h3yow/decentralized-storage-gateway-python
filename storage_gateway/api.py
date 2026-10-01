@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import GatewayConfig
@@ -14,6 +14,7 @@ from .errors import (
     EmptyContentError,
     NodeNotFoundError,
     CapacityExceededError,
+    ReplicaUnavailableError,
     UnauthorizedNodeError,
     NodeOfflineError,
     StorageError,
@@ -26,6 +27,7 @@ _ERROR_STATUS: dict[type[StorageError], int] = {
     EmptyContentError: 400,
     ChecksumMismatchError: 422,
     ContentNotFoundError: 404,
+    ReplicaUnavailableError: 503,
     NodeNotFoundError: 404,
     UnauthorizedNodeError: 403,
     NodeOfflineError: 409,
@@ -127,10 +129,30 @@ def create_app(
             "cid": result.cid,
             "retrievable": result.retrievable,
             "online_replica_count": result.online_replica_count,
+            "online_corrupted_count": result.online_corrupted_count,
             "total_replica_count": result.total_replica_count,
             "threshold": result.threshold,
             "reasons": list(result.reasons),
         }
+
+    @app.get("/contents/{cid}/bytes")
+    def content_bytes(cid: str):
+        """取回原始字节：返回 application/octet-stream，并回带 CID/校验头。
+
+        - CID 从未提交过          -> 404 ContentNotFoundError
+        - 有记录但无在线健康副本  -> 503 ReplicaUnavailableError
+        取回的字节必然与 CID 相符（坏副本会被自动隔离、改取其他健康副本）。
+        """
+        data = gw.retrieve(cid)
+        return Response(
+            content=data,
+            media_type="application/octet-stream",
+            headers={
+                "X-Content-Cid": cid,
+                "X-Content-Sha256": cid,
+                "Content-Length": str(len(data)),
+            },
+        )
 
     @app.post("/contents/{cid}/repair")
     def repair(cid: str):
@@ -141,6 +163,8 @@ def create_app(
             "before_online_count": report.before_online_count,
             "after_online_count": report.after_online_count,
             "target_nodes": list(report.target_nodes),
+            "replaced_nodes": list(report.replaced_nodes),
+            "valid_replica_count": report.valid_replica_count,
             "reason": report.reason,
         }
 

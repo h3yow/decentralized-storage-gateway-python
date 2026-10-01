@@ -58,6 +58,14 @@ class StorageGateway:
     def status(self, cid: str) -> RetrievabilityResult:
         return self._registry.check_retrievability(cid)
 
+    def retrieve(self, cid: str) -> bytes:
+        """按内容标识取回与提交时完全一致的字节。
+
+        只从在线健康副本取回；CID 从未提交 -> ContentNotFoundError，
+        有记录但当前无在线健康副本 -> ReplicaUnavailableError。
+        """
+        return self._registry.retrieve_content(cid)
+
     def repair(self, cid: str) -> RepairReport:
         return self._repair.repair(cid)
 
