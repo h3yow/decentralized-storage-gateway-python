@@ -142,6 +142,8 @@ def create_app(
             "threshold": result.threshold,
             "reasons": list(result.reasons),
             "corrupt_replica_count": result.corrupt_replica_count,
+            # 有效（未损坏、含离线好副本）副本数：补副本判定口径
+            "healthy_replica_count": result.healthy_replica_count,
         }
 
     @app.post("/contents/{cid}/repair")
@@ -156,6 +158,9 @@ def create_app(
             "reason": report.reason,
             "replaced_corrupt_nodes": list(report.replaced_corrupt_nodes),
             "valid_nodes": list(report.valid_nodes),
+            "target_replica_count": report.target_replica_count,
+            "healthy_replica_count": report.healthy_replica_count,
+            "offline_valid_nodes": list(report.offline_valid_nodes),
         }
 
     return app

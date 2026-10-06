@@ -31,8 +31,11 @@ class RetrievabilityResult:
     total_replica_count: int
     threshold: int
     reasons: tuple[str, ...] = ()
-    # 已被判定损坏（字节与 CID 不符）的副本数；不计入在线健康副本
+    # 已被判定损坏（字节与 CID 不符）的副本数；不计入健康副本
     corrupt_replica_count: int = 0
+    # 有效（未损坏）副本总数，在线与离线节点上的好副本都计入。
+    # 修复是否需要补副本以该口径为准，而不是只看在线数。
+    healthy_replica_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -49,3 +52,9 @@ class RepairReport:
     replaced_corrupt_nodes: tuple[str, ...] = ()
     # 修复结束后持有有效（未损坏）副本的全部节点
     valid_nodes: tuple[str, ...] = ()
+    # 修复目标份数：修复后有效副本数不应超过该值
+    target_replica_count: int = 0
+    # 修复结束后有效（未损坏，含离线节点上的好副本）副本总数
+    healthy_replica_count: int = 0
+    # 修复结束后仍持有有效副本、但节点当前离线的节点 id
+    offline_valid_nodes: tuple[str, ...] = ()

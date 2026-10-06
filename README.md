@@ -40,8 +40,35 @@
   通过 `corrupt_replica_count` 单独说明；修复也不会拿它当来源。
 - **替换**：修复时先移除损坏副本（释放其容量记账、清除损坏登记），再从可信样本
   补齐健康副本——原节点若在线且容量足够会被重新选中，即"原地替换"。
-- **守恒**：替换是"先移除再放置"，容量不会重复计费；修复只把健康在线副本补到
-  阈值，有效副本数不超出修复目标；原内容再次提交仍归一到同一 CID，不新增副本。
+- **守恒**：替换是"先移除再放置"，容量不会重复计费（同一节点原地替换时
+  `used_bytes` 撤一份、补一份，恰好抵消，只占用一份配额）；修复只把
+  **有效**副本补到目标份数，有效副本数绝不超出修复目标；原内容再次提交
+  仍归一到同一 CID，不新增副本。
+
+## 1.2 修复目标口径（有效副本数 vs 目标份数）
+
+这是本次完善的核心约定，用于根治"节点在修复期间上下线抖动后副本越修越多"：
+
+- **目标份数** = `retrieval_threshold`（阈值），记为 `T`。
+- **有效副本** = 未被判定损坏的副本；**无论其所在节点当前在线还是暂时离线，
+  数据本身完好就算一份**。字段对应：
+  - `online_replica_count`：在线且健康的副本数（决定"现在能否读取"）；
+  - `healthy_replica_count`：有效副本总数，**含暂时离线节点上的好副本**
+    （决定"是否还需要补副本"）；
+  - `total_replica_count`：物理副本总数（含已损坏但尚未撤下的）。
+- **修复判定口径**：需要补几份 = `T - healthy_replica_count`，而不是
+  `T - online_replica_count`。因此：
+  - 一个持有好副本的节点在修复期间离线：这份好副本仍计入目标，修复**不会**
+    因此多补一份；它恢复上线后有效副本数仍恰好 ≤ `T`，不可能超标。
+  - 哪怕此刻在线数不足、内容暂时不可检索，只要"在线 + 离线的好副本"合计
+    已达到 `T`，本次也**不补新副本**（报告标注"无需补副本"并给出
+    `offline_valid_nodes`），等节点恢复即可，宁可不修也不超量。
+- **不变式**：任何修复结束后，`healthy_replica_count <= T`、
+  `valid_nodes` 数量 ≤ `T`；且修复**只补健康副本，绝不删除、移动或覆盖
+  健康好副本**（包括离线上的唯一样本）。
+- 例外说明：若有效副本数不足 `T`、但仅有的好副本所在节点全部离线，
+  本次"修复暂缓"（没有在线健康样本可复制，唯一样本原样保留，等待恢复）；
+  若副本此前已全部损坏并撤下，则直接从注册表可信样本恢复，不受此限。
 
 ## 2. 副本与可检索性规则
 
@@ -84,16 +111,25 @@
 
 - 仅当不可检索**或存在已判定损坏的副本**时动作；候选节点按节点 id 排序后确定性选择。
 - 候选必须同时满足：**已注册、已授权、在线、尚无该副本、剩余容量充足**。
-- **先替换坏副本**：已判定损坏的副本先被移除（释放容量、清除登记），再按阈值缺口
-  补齐健康副本；被移除坏副本的在线节点可作为普通候选被重新选中（原地替换）。
-- **全部健康副本离线时不修复**：没有在线健康样本可复制，返回失败报告且保留原状态
-  （唯一样本原样保留在原节点）；若副本全部损坏被移除，则从注册表可信样本恢复。
+- **先替换坏副本**：已判定损坏的副本先被移除（释放容量、清除登记），再按
+  **有效副本缺口**（`目标份数 - 含离线好副本的有效副本数`）补齐健康副本；
+  被移除坏副本的在线节点可作为普通候选被重新选中（原地替换）。
+- **节点抖动不超量**：补几份以"在线 + 离线的好副本"合计为准（见 1.2），
+  修复期间好副本节点反复上下线，结束后有效副本数都不会超过目标份数。
+- **全部健康副本离线时暂缓**：没有在线健康样本可复制时返回暂缓报告且保留
+  原状态（唯一样本原样保留在离线节点，绝不动它）；若副本全部损坏被移除，
+  则从注册表可信样本恢复。
 - 找不到合规节点时**保留健康副本原状**，报告原因"没有合规且容量足够的在线节点"。
 - 只能补齐部分（中途候选耗尽）时返回"部分修复"，并给出修复前后计数。
 - 已达标且无损坏副本时修复为幂等空操作。
-- `RepairReport` 结论字段：`target_nodes`（新增副本节点）、
-  `replaced_corrupt_nodes`（被替换的坏副本节点）、`valid_nodes`（修复后持有
-  有效副本的全部节点），配合前后计数可完整解释修复结果。
+- `RepairReport` 结论字段：
+  - `target_nodes`：本次新增副本所在节点；
+  - `replaced_corrupt_nodes`：坏副本被换下的节点；
+  - `valid_nodes`：修复后持有**有效副本**的全部节点（在线+离线上的好副本）；
+  - `offline_valid_nodes`：其中当前仍离线的好副本节点（恢复即在目标内）；
+  - `target_replica_count`：目标份数 `T`；
+  - `healthy_replica_count`：修复后有效副本总数（恒 ≤ `target_replica_count`）；
+  - `before/after_online_count` 与 `reason`：修复前后在线数与可解释结论。
 
 ## 3. 并发与守恒
 
@@ -111,7 +147,11 @@
   - 读取与修复并发交叉（含坏副本）→ 坏副本绝不作为结果返回，修复后健康副本
     恰好达到阈值、无残留损坏登记、容量记账与实际副本数一致；
   - 节点上下线与读取/修复交叉 → 读取要么得到正确字节要么显式失败，
-    最终状态可修复回阈值且记账守恒。
+    最终状态可修复回阈值且记账守恒；
+  - **持好副本的节点在修复期间反复上下线** → 每次修复后
+    `healthy_replica_count <= 目标份数`、`valid_nodes` 不超标，节点恢复后
+    有效副本数仍恰好为目标；坏副本"先撤后补"时同一节点容量不重复计费
+    （`tests/test_repair_flapping.py`，多轮参数化重复稳定通过）。
 
 ## 4. 可配置项（`GatewayConfig`）
 
@@ -137,37 +177,57 @@ gw = StorageGateway(config=GatewayConfig(retrieval_threshold=3))
 | GET | `/contents/{cid}` | 取回原始字节（404 从未提交 / 503 无健康在线副本） |
 | POST | `/contents/{cid}/replicas` | 批量复制 `{node_ids: [...]}`，返回逐节点结论 |
 | PUT | `/contents/{cid}/replicas/{node_id}` | 单节点放置，失败映射为可区分状态码 |
-| GET | `/contents/{cid}/status` | 可检索性判定与原因（含 `corrupt_replica_count`） |
-| POST | `/contents/{cid}/repair` | 触发修复，返回修复报告（含坏副本替换说明） |
+| GET | `/contents/{cid}/status` | 可检索性判定与原因（含 `corrupt_replica_count`、`healthy_replica_count`） |
+| POST | `/contents/{cid}/repair` | 触发修复，返回修复报告（含坏副本替换、有效节点、目标口径说明） |
 
 启动：`uv run fastapi dev main.py`（交互式文档 `/docs`）。
 
 ### 兼容范围
 
 - 既有接口（提交、复制、状态、修复、节点管理）的路径、请求/响应字段与错误码
-  全部保持不变；`/contents/{cid}/status` 与修复报告仅**新增**字段，旧客户端可忽略。
+  全部保持不变；`/contents/{cid}/status` 与修复报告仅**新增**字段
+  （状态新增 `healthy_replica_count`；报告新增 `target_replica_count`、
+  `healthy_replica_count`、`offline_valid_nodes`），旧客户端可忽略。
 - 库层 `StorageGateway` 新增 `retrieve(cid)`；`StorageNode.place` 签名变为
   `place(cid, size, data)`（节点现在真实保存字节），直接调用节点的内部代码需适配。
-- 唯一的行为变化：已判定损坏的副本不再计入"在线健康副本数"，修复会主动移除并
-  替换坏副本（此前系统没有损坏概念）。
+- 行为变化：
+  1. 已判定损坏的副本不再计入"在线健康副本数"，修复会主动移除并替换坏副本
+     （此前系统没有损坏概念）；
+  2. **修复补副本的口径改为"有效副本（含暂时离线好副本）"**：修复期间好副本
+     节点上下线抖动不再导致有效副本数超出目标份数。此前只按在线数算缺口，
+     节点离线时会多补、恢复后即超标。
 
 ## 6. 验证方法
 
 ```bash
-# 全部单测（37 个用例，默认打印 INFO 级输入与判定依据日志）
+# 全部单测（53 个用例；INFO 级输入/判定日志 + 结束时按业务模块分组的通过统计）
 uv run pytest
 
-# 安静模式（日志仍按 pytest.ini 配置输出）
+# 安静模式（仍输出业务分组汇总）
 uv run pytest -q
+
+# 只看节点抖动 × 修复交叉（防超量/记账守恒），含多轮参数化并发用例
+uv run pytest tests/test_repair_flapping.py -v
 
 # 只看读取链路与坏副本治理
 uv run pytest tests/test_retrieval.py -v
+
+# 多轮重复，确认并发/抖动用例稳定通过（偶发机器抖动时可加大重复次数）
+for i in $(seq 1 10); do uv run pytest tests/test_repair_flapping.py -q; done
 ```
+
+测试结束后会打印 **"按业务模块统计用例通过情况"**，逐业务（内容寻址/提交去重、
+副本放置拒绝、节点上下线计数、可检索性判定与阈值修复、内容读取与坏副本治理、
+节点抖动×修复交叉、高并发守恒、HTTP 集成）列出用例名与 PASS/FAIL，
+可一眼看出覆盖了哪些业务及各自通过情况。
 
 测试覆盖：内容损坏/空内容、归一去重、容量不足、未授权节点、重复放置、
 节点上下线计数守恒、修复成功/失败保留/全离线唯一样本保留、按 CID 读取与
 字节一致性、坏副本识别/隔离/替换、修复后容量记账守恒，以及多组高并发场景
-（含读取与修复并发交叉、上下线抖动交叉）。
+（含读取与修复并发交叉、上下线抖动交叉）。其中 `tests/test_repair_flapping.py`
+专门稳定复现"持好副本节点修复期间离线又恢复导致超量"的问题，确定性交织用例 +
+多轮参数化并发用例重复运行均稳定通过，且不回归提交去重、放置拒绝、上下线计数
+等既有用例。
 
 本地手动验证读取链路（模拟落盘数据被篡改）：
 
@@ -187,6 +247,30 @@ gw.status(cid).corrupt_replica_count   # 1
 gw.repair(cid)              # 替换 n1 上的坏副本，恢复 2 份健康副本
 ```
 
+本地手动验证"修复期间节点抖动不超量"：
+
+```python
+from storage_gateway.node import StorageNode
+from storage_gateway.models import NodeStatus
+from storage_gateway.gateway import StorageGateway
+
+gw = StorageGateway(retrieval_threshold=2)
+for nid in ("n1", "n2", "n3"):
+    gw.registry.register_node(StorageNode(nid, 10_000))
+cid = gw.submit(b"flap").cid
+gw.replicate(cid, ["n1", "n2"])
+
+# 持有好副本的 n2 在修复窗口内离线
+gw.registry.set_node_status("n2", NodeStatus.OFFLINE)
+report = gw.repair(cid)
+report.target_nodes                      # () —— 离线好副本已计入目标，不再补
+report.healthy_replica_count             # 2（含离线上的好副本）
+
+# n2 过一会儿恢复上线
+gw.registry.set_node_status("n2", NodeStatus.ONLINE)
+gw.registry.total_replica_count(cid)     # 2 —— 有效副本数恰好目标，不超标
+```
+
 ## 7. 代码结构
 
 ```
@@ -196,9 +280,10 @@ storage_gateway/
 ├── hashing.py    # SHA-256 摘要与校验
 ├── models.py     # ContentMetadata / RetrievabilityResult / RepairReport
 ├── node.py       # StorageNode：容量、授权、上下线、本地副本字节
-├── registry.py   # ContentRegistry：内容归一、放置记账、读取校验、损坏登记（锁核心）
-├── repair.py     # RepairManager：阈值修复、坏副本替换与失败说明
+├── registry.py   # ContentRegistry：内容归一、放置记账、读取校验、损坏登记、
+│                 #   在线/有效（含离线）健康副本计数（锁核心）
+├── repair.py     # RepairManager：按"有效副本口径"补到目标且不超量、坏副本替换
 ├── gateway.py    # StorageGateway：服务门面
 └── api.py        # FastAPI 入口与错误码映射
-tests/            # 内容寻址/放置/上下线/修复/读取与坏副本/并发/HTTP 集成测试
+tests/            # 内容寻址/放置/上下线/修复/读取与坏副本/抖动修复交叉/并发/HTTP
 ```

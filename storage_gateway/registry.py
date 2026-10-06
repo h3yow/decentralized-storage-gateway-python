@@ -227,6 +227,37 @@ class ContentRegistry:
                 and n.node_id not in corrupt
             )
 
+    def healthy_replica_count(self, cid: str) -> int:
+        """有效（未损坏）副本总数：在线与离线节点上的好副本都计入。
+
+        这是"是否还需要补副本"的口径：暂时离线但数据完好的副本仍算数，
+        只要该口径已经达到目标份数，修复就不再新增副本，避免节点抖动
+        恢复后有效副本数超出目标。
+        """
+        with self._lock:
+            self._require_content(cid)
+            corrupt = self._corrupt.get(cid, set())
+            return sum(
+                1
+                for n in self._nodes.values()
+                if n.has(cid) and n.node_id not in corrupt
+            )
+
+    def offline_healthy_nodes_for(self, cid: str) -> tuple[str, ...]:
+        """持有有效好副本、但节点当前离线的节点 id（排序快照）。"""
+        with self._lock:
+            self._require_content(cid)
+            corrupt = self._corrupt.get(cid, set())
+            return tuple(
+                sorted(
+                    n.node_id
+                    for n in self._nodes.values()
+                    if n.status is NodeStatus.OFFLINE
+                    and n.has(cid)
+                    and n.node_id not in corrupt
+                )
+            )
+
     def check_retrievability(self, cid: str) -> RetrievabilityResult:
         """按"在线健康副本数 >= 阈值"判定可检索性并给出原因。
 
@@ -236,6 +267,8 @@ class ContentRegistry:
             self._require_content(cid)
             total = self.total_replica_count(cid)
             online = self.online_replica_count(cid)
+            healthy = self.healthy_replica_count(cid)
+            offline_healthy = healthy - online
             corrupt_count = len(self._corrupt.get(cid, ()))
             retrievable = online >= self._threshold
             reasons: list[str] = []
@@ -247,6 +280,17 @@ class ContentRegistry:
                 reasons.append(
                     f"在线副本数 {online} 低于检索阈值 {self._threshold}"
                     f"（总副本数 {total}）"
+                )
+            # 有效（含离线）好副本已经达到目标份数时，即使在线数不足也不再
+            # 需要补副本：节点恢复后有效副本数仍在目标内，修复不得超量。
+            if (
+                not retrievable
+                and healthy >= self._threshold
+                and offline_healthy > 0
+            ):
+                reasons.append(
+                    f"另有 {offline_healthy} 个有效副本所在节点暂时离线，"
+                    f"有效副本数 {healthy} 已达到目标份数 {self._threshold}，无需补副本"
                 )
             if corrupt_count:
                 reasons.append(f"另有 {corrupt_count} 个副本已被判定损坏，不计入健康副本")
@@ -266,6 +310,7 @@ class ContentRegistry:
                 threshold=self._threshold,
                 reasons=tuple(reasons),
                 corrupt_replica_count=corrupt_count,
+                healthy_replica_count=healthy,
             )
 
     def total_replicas_system_wide(self) -> int:
