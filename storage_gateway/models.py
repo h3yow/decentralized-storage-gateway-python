@@ -49,3 +49,7 @@ class RepairReport:
     replaced_corrupt_nodes: tuple[str, ...] = ()
     # 修复结束后持有有效（未损坏）副本的全部节点
     valid_nodes: tuple[str, ...] = ()
+    # 修复结束时的有效副本数（含暂时离线的健康副本）与目标份数：
+    # 不变式为 after_effective_count <= target_count（修复自身绝不超量）
+    after_effective_count: int = 0
+    target_count: int = 0

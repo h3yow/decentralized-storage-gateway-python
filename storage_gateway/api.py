@@ -156,6 +156,8 @@ def create_app(
             "reason": report.reason,
             "replaced_corrupt_nodes": list(report.replaced_corrupt_nodes),
             "valid_nodes": list(report.valid_nodes),
+            "after_effective_count": report.after_effective_count,
+            "target_count": report.target_count,
         }
 
     return app

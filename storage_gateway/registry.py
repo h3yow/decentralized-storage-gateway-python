@@ -227,6 +227,22 @@ class ContentRegistry:
                 and n.node_id not in corrupt
             )
 
+    def effective_replica_count(self, cid: str) -> int:
+        """有效副本数：节点持有且未被判定损坏的副本数，**不区分在线/离线**。
+
+        暂时离线但数据完好的副本也是有效副本——它们随时可能随节点恢复而
+        重新可用。修复"要不要补、补几份"必须以本口径为准，否则节点恢复
+        上线后系统里的有效副本数会超出目标份数。
+        """
+        with self._lock:
+            self._require_content(cid)
+            corrupt = self._corrupt.get(cid, set())
+            return sum(
+                1
+                for n in self._nodes.values()
+                if n.has(cid) and n.node_id not in corrupt
+            )
+
     def check_retrievability(self, cid: str) -> RetrievabilityResult:
         """按"在线健康副本数 >= 阈值"判定可检索性并给出原因。
 
